@@ -3,6 +3,10 @@
 """
 Telegram Verification Bot
 Бот для верификации пользователей перед доступом к приватной группе
+
+⚠️ ДИСКЛЕЙМЕР: Бот не хранит видеосообщения и персональные данные пользователей.
+Вся информация является посредником между администрацией и пользователем.
+Видеосообщения пересылаются администраторам для проверки и не сохраняются на сервере.
 """
 
 import logging
@@ -27,10 +31,10 @@ from telegram.constants import ChatType
 # Токен бота (получить у @BotFather)
 TOKEN = os.environ.get("TOKEN", "")
 # ID администраторов (узнать через @userinfobot или @getidsbot)
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "0").split(",") if x]  # Замени на реальные ID
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "0").split(",") if x]
 
 # Ссылка на приватную группу (пригласительная ссылка)
-PRIVATE_GROUP_LINK = os.environ.get("PRIVATE_GROUP_LINK", "")  # Замени на реальную ссылку
+PRIVATE_GROUP_LINK = os.environ.get("PRIVATE_GROUP_LINK", "")
 
 # ID чата для пересылки кружочков (None = отправлять админам в ЛС)
 MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", "")
@@ -132,8 +136,8 @@ def calculate_age(birthdate: str) -> int:
 
 def generate_emoji() -> str:
     hand_emojis = [
-        "👍", "👎", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙",
-        "👈", "👆", "🖕", "👇", "☝️", "🤚", "🖐️", "🖖", "🫰"
+        "👍", "👎", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙"  "👆", "🖕", "☝️","🤚", "🖐️",
+        "🖖", "🫰"
     ]
     return random.choice(hand_emojis)
 
@@ -172,6 +176,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Новый пользователь - начинаем верификацию
     await update.message.reply_text(
         "👋 Привет! Для доступа к приватной группе нужно пройти верификацию.\n\n"
+        "⚠️ Бот является посредником между тобой и администрацией. "
+        "Твои данные и видеосообщения не хранятся на сервере, а лишь пересылаются администраторам для проверки.\n\n"
         "Шаг 1/3: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
         "Пример: 15.03.1995"
     )
@@ -202,7 +208,7 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Шаг 2/3: Твой персональный смайлик для верификации: {emoji}\n\n"
         f"Шаг 3/3: Запиши кружок (видео-сообщение), где ты показываешь "
         f"этот смайлик руками или держишь его на листочке рядом с лицом.\n\n"
-        f"Отправь кружок прямо сюда!"
+        f"⚠️ Важно: отправь именно кружок (круглое видео), а не обычное видео или фото!"
     )
     return STATE_VIDEO_NOTE
 
@@ -278,6 +284,20 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Обычно проверка занимает несколько минут. Я пришлю результат!"
     )
     return ConversationHandler.END
+
+async def wrong_message_in_video_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка НЕправильных сообщений в состоянии ожидания кружка"""
+    emoji = context.user_data.get('emoji', '❓')
+    
+    await update.message.reply_text(
+        f"❌ Это не кружок!\n\n"
+        f"Ты должен отправить именно кружок (круглое видео-сообщение), "
+        f"где показываешь смайлик {emoji}.\n\n"
+        f"⚠️ Подсказка: в Telegram зажми кнопку микрофона и свайпни вверх, "
+        f"чтобы записать кружок. Или нажми скрепку → Видеосообщение.\n\n"
+        f"Попробуй ещё раз!"
+    )
+    return STATE_VIDEO_NOTE  # Остаёмся в том же состоянии
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена верификации"""
@@ -458,7 +478,9 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, get_birthdate)
             ],
             STATE_VIDEO_NOTE: [
-                MessageHandler(filters.VIDEO_NOTE, get_video_note)
+                MessageHandler(filters.VIDEO_NOTE, get_video_note),
+                # Любое другое сообщение (фото, текст, обычное видео) — отклоняем
+                MessageHandler(filters.ALL & ~filters.VIDEO_NOTE & ~filters.COMMAND, wrong_message_in_video_state)
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
