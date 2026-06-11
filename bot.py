@@ -25,15 +25,15 @@ from telegram.constants import ChatType
 # ==================== НАСТРОЙКИ ====================
 
 # Токен бота (получить у @BotFather)
-TOKEN = "8712053733:AAGfK8gdIY6gbKZfFwiJmqwIPhEn-Ag-edQ"
+TOKEN = os.environ.get("TOKEN", "")
 # ID администраторов (узнать через @userinfobot или @getidsbot)
-ADMIN_IDS = [1223283503, 625461569]  # Замени на реальные ID
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "0").split(",") if x]  # Замени на реальные ID
 
 # Ссылка на приватную группу (пригласительная ссылка)
-PRIVATE_GROUP_LINK = "https://t.me/+GOKlEAOF-dk5YmNi"  # Замени на реальную ссылку
+PRIVATE_GROUP_LINK = os.environ.get("PRIVATE_GROUP_LINK", "")  # Замени на реальную ссылку
 
 # ID чата для пересылки кружочков (None = отправлять админам в ЛС)
-MODERATION_CHAT_ID = "https://t.me/+bMOMWxrSD1s4YmFi"
+MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", "")
 
 # Файл базы данных
 DB_FILE = "verification_bot.db"
