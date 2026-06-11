@@ -1,13 +1,8 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telegram Verification Bot
+Telegram Verification Bot (Render-optimized)
 Бот для верификации пользователей перед одобрением заявки на вступление в приватную группу
-
-⚠️ ДИСКЛЕЙМЕР: Бот не хранит видеосообщения и персональные данные пользователей.
-Вся информация является посредником между администрацией и пользователем.
-Видеосообщения пересылаются администраторам для проверки и не сохраняются на сервере.
 """
 
 import logging
@@ -15,6 +10,9 @@ import random
 import sqlite3
 import os
 import traceback
+import asyncio
+import signal
+import sys
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,20 +28,15 @@ from telegram.ext import (
 
 # ==================== НАСТРОЙКИ ====================
 
-# Токен бота (получить у @BotFather)
 TOKEN = os.environ.get("TOKEN", "")
-# ID администраторов (узнать через @userinfobot или @getidsbot)
-# Формат: "123456789,987654321" (через запятую, без пробелов)
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-
-# ID приватной группы (куда люди подают заявки)
-# Узнать: добавьте бота @getidsbot в группу, он покажет ID (начинается с -100)
 GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "").strip()
-
-# ID чата для пересылки кружочков на модерацию (None или пусто = отправлять админам в ЛС)
 MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", "").strip()
 
-# Файл базы данных
+# Render-specific
+RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+PORT = int(os.environ.get("PORT", "10000"))
+
 DB_FILE = "verification_bot.db"
 
 # ==================== ЛОГИРОВАНИЕ ====================
@@ -61,7 +54,6 @@ logger = logging.getLogger(__name__)
 # ==================== БАЗА ДАННЫХ ====================
 
 def init_db():
-    """Инициализация SQLite базы данных"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
@@ -140,37 +132,29 @@ def calculate_age(birthdate: str) -> int:
         return None
 
 def generate_emoji() -> str:
-    hand_emojis = [
-        "👍", "👎", "👌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙",
-        "👆", "🖕", "☝️", "👋", "🤚", "🖐️", "✋", "🖖"
-    ]
+    hand_emojis = ["👍", "👎", "👌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👆", "🖕", "☝️", "👋", "🤚", "🖐️", "✋", "🖖"]
     return random.choice(hand_emojis)
 
-# ==================== ОБРАБОТЧИК ЗАЯВОК НА ВСТУПЛЕНИЕ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка заявки на вступление в группу"""
     join_request = update.chat_join_request
     user = join_request.from_user
     chat = join_request.chat
     
-    # Сохраняем ID группы, куда человек хочет вступить
     context.user_data['group_chat_id'] = chat.id
     context.user_data['join_request_chat_id'] = chat.id
     
-    # Проверяем, есть ли уже заявка от этого пользователя
     user_data = get_user(user.id)
     
     if user_data and user_data['status'] == 'verified':
-        # Уже верифицирован — сразу одобряем заявку
         try:
             await join_request.approve()
-            logger.info(f"✅ Авто-одобрение заявки для {user.id} (уже верифицирован)")
+            logger.info(f"✅ Авто-одобрение заявки для {user.id}")
             return ConversationHandler.END
         except Exception as e:
             logger.error(f"Ошибка авто-одобрения: {e}")
     
-    # Отправляем сообщение в ЛС для верификации
     try:
         await context.bot.send_message(
             chat_id=user.id,
@@ -189,58 +173,41 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Не удалось отправить сообщение пользователю {user.id}: {e}")
         return ConversationHandler.END
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Старт — если пользователь просто написал боту без заявки"""
     user = update.effective_user
     user_data = get_user(user.id)
     
     if user_data and user_data['status'] == 'verified':
-        await update.message.reply_text(
-            "✅ Ты уже прошёл верификацию! Теперь можешь подать заявку на вступление в группу."
-        )
+        await update.message.reply_text("✅ Ты уже прошёл верификацию!")
         return ConversationHandler.END
     
     if user_data and user_data['status'] == 'rejected':
         if ADMIN_IDS:
-            keyboard = [[InlineKeyboardButton("📞 Связаться с администрацией", 
-                        url=f"tg://user?id={ADMIN_IDS[0]}")]]
+            keyboard = [[InlineKeyboardButton("📞 Связаться с администрацией", url=f"tg://user?id={ADMIN_IDS[0]}")]]
             await update.message.reply_text(
-                "❌ Твоя верификация была отклонена.\n\n"
-                "Если ты считаешь, что произошла ошибка, нажми кнопку ниже:",
+                "❌ Твоя верификация была отклонена.\n\nЕсли считаешь, что ошибка — нажми кнопку ниже:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            await update.message.reply_text(
-                "❌ Твоя верификация была отклонена.\n"
-                "Напиши /start чтобы попробовать снова."
-            )
+            await update.message.reply_text("❌ Твоя верификация была отклонена. Напиши /start чтобы попробовать снова.")
         return ConversationHandler.END
     
     if user_data and user_data['status'] == 'pending':
-        await update.message.reply_text(
-            "⏳ Ты уже начал верификацию. Дождись проверки администратором."
-        )
+        await update.message.reply_text("⏳ Ты уже начал верификацию. Дождись проверки.")
         return ConversationHandler.END
     
-    # Если просто написал /start без заявки — объясняем
     await update.message.reply_text(
         "👋 Привет! Это бот для верификации перед вступлением в приватную группу.\n\n"
-        "Чтобы начать верификацию, подай заявку на вступление в группу — бот автоматически напишет тебе."
+        "Чтобы начать, подай заявку на вступление в группу — бот автоматически напишет тебе."
     )
     return ConversationHandler.END
 
 async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение даты рождения"""
     text = update.message.text.strip()
     age = calculate_age(text)
     
     if age is None or age < 0 or age > 120:
-        await update.message.reply_text(
-            "❌ Неверный формат. Введи дату в формате ДД.ММ.ГГГГ\n"
-            "Пример: 15.03.1995"
-        )
+        await update.message.reply_text("❌ Неверный формат. Введи дату в формате ДД.ММ.ГГГГ\nПример: 15.03.1995")
         return STATE_BIRTHDATE
     
     context.user_data['birthdate'] = text
@@ -251,19 +218,16 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"📅 Возраст: {age} лет\n\n"
-        f"Шаг 2/3: Твой персональный смайлик для верификации: {emoji}\n\n"
-        f"Шаг 3/3: Запиши кружок (видео-сообщение), где ты показываешь "
-        f"этот смайлик руками или держишь его на листочке рядом с лицом.\n\n"
-        f"⚠️ Важно: отправь именно кружок (круглое видео), а не обычное видео или фото!"
+        f"Шаг 2/3: Твой персональный смайлик: {emoji}\n\n"
+        f"Шаг 3/3: Запиши кружок, где показываешь этот смайлик руками или на листочке рядом с лицом.\n\n"
+        f"⚠️ Отправь именно кружок (круглое видео), а не обычное видео!"
     )
     return STATE_VIDEO_NOTE
 
 async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение кружочка и отправка на модерацию"""
     user = update.effective_user
     group_chat_id = context.user_data.get('group_chat_id')
     
-    # Сохраняем пользователя в БД
     try:
         save_user(
             user_id=user.id,
@@ -278,12 +242,9 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"Ошибка сохранения в БД: {e}\n{traceback.format_exc()}")
-        await update.message.reply_text(
-            "❌ Произошла внутренняя ошибка. Попробуй подать заявку снова."
-        )
+        await update.message.reply_text("❌ Внутренняя ошибка. Попробуй снова.")
         return ConversationHandler.END
     
-    # Отправляем кружок админам на проверку
     admin_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve_{user.id}"),
@@ -303,85 +264,51 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Проверь кружок и нажми решение:"
     )
     
-    # Отправляем в чат модерации или всем админам
     try:
         if MODERATION_CHAT_ID:
             mod_chat_id = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
-            await context.bot.send_message(
-                chat_id=mod_chat_id,
-                text=moderation_text,
-                reply_markup=admin_keyboard
-            )
-            await context.bot.forward_message(
-                chat_id=mod_chat_id,
-                from_chat_id=user.id,
-                message_id=update.message.message_id
-            )
+            await context.bot.send_message(chat_id=mod_chat_id, text=moderation_text, reply_markup=admin_keyboard)
+            await context.bot.forward_message(chat_id=mod_chat_id, from_chat_id=user.id, message_id=update.message.message_id)
         else:
             if not ADMIN_IDS:
                 logger.error("ADMIN_IDS не заданы!")
-                await update.message.reply_text(
-                    "❌ Ошибка конфигурации бота. Обратитесь к администратору."
-                )
+                await update.message.reply_text("❌ Ошибка конфигурации бота.")
                 return ConversationHandler.END
                 
             for admin_id in ADMIN_IDS:
                 try:
-                    await context.bot.send_message(
-                        chat_id=admin_id,
-                        text=moderation_text,
-                        reply_markup=admin_keyboard
-                    )
-                    await context.bot.forward_message(
-                        chat_id=admin_id,
-                        from_chat_id=user.id,
-                        message_id=update.message.message_id
-                    )
+                    await context.bot.send_message(chat_id=admin_id, text=moderation_text, reply_markup=admin_keyboard)
+                    await context.bot.forward_message(chat_id=admin_id, from_chat_id=user.id, message_id=update.message.message_id)
                 except Exception as e:
                     logger.error(f"Не удалось отправить админу {admin_id}: {e}")
     except Exception as e:
         logger.error(f"Ошибка отправки на модерацию: {e}\n{traceback.format_exc()}")
-        await update.message.reply_text(
-            "❌ Не удалось отправить на проверку. Попробуй ещё раз."
-        )
+        await update.message.reply_text("❌ Не удалось отправить на проверку. Попробуй ещё раз.")
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "⏳ Кружок отправлен на проверку администратору.\n"
-        "Обычно проверка занимает несколько минут. Я пришлю результат!"
+        "⏳ Кружок отправлен на проверку администратору.\nОбычно проверка занимает несколько минут."
     )
     return ConversationHandler.END
 
 async def wrong_message_in_video_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка НЕправильных сообщений в состоянии ожидания кружка"""
     emoji = context.user_data.get('emoji', '❓')
-    
     await update.message.reply_text(
-        f"❌ Это не кружок!\n\n"
-        f"Ты должен отправить именно кружок (круглое видео-сообщение), "
-        f"где показываешь смайлик {emoji}.\n\n"
-        f"⚠️ Подсказка: в Telegram зажми кнопку микрофона и свайпни вверх, "
-        f"чтобы записать кружок. Или нажми скрепку → Видеосообщение.\n\n"
-        f"Попробуй ещё раз!"
+        f"❌ Это не кружок!\n\nОтправь кружок (круглое видео), где показываешь смайлик {emoji}.\n\n"
+        f"Подсказка: зажми кнопку микрофона и свайпни вверх, или нажми скрепку → Видеосообщение."
     )
     return STATE_VIDEO_NOTE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена верификации"""
-    await update.message.reply_text(
-        "❌ Верификация отменена. Подай заявку на вступление снова, чтобы начать заново."
-    )
+    await update.message.reply_text("❌ Верификация отменена. Подай заявку снова.")
     return ConversationHandler.END
 
-# ==================== ОБРАБОТКА КНОПОК АДМИНА ====================
-
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка решений администратора"""
     query = update.callback_query
     await query.answer()
     
     if not is_admin(update.effective_user.id):
-        await query.edit_message_text("⛔ У тебя нет прав для этого действия.")
+        await query.edit_message_text("⛔ У тебя нет прав.")
         return
     
     data = query.data
@@ -392,208 +319,134 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_chat_id = user_data.get('group_chat_id') if user_data else None
     
     if action == "approve":
-        # Одобряем пользователя в БД
         update_user_status(user_id, 'verified', update.effective_user.id)
         
-        # Одобряем заявку на вступление в группу
         if group_chat_id:
             try:
-                await context.bot.approve_chat_join_request(
-                    chat_id=group_chat_id,
-                    user_id=user_id
-                )
-                logger.info(f"✅ Заявка пользователя {user_id} одобрена в группе {group_chat_id}")
+                await context.bot.approve_chat_join_request(chat_id=group_chat_id, user_id=user_id)
+                logger.info(f"✅ Заявка {user_id} одобрена в группе {group_chat_id}")
             except Exception as e:
-                logger.error(f"Ошибка одобрения заявки: {e}\n{traceback.format_exc()}")
-                # Уведомляем админа, что нужно вручную одобрить
-                await query.edit_message_text(
-                    f"✅ Пользователь {user_id} верифицирован, но не удалось автоматически одобрить заявку.\n"
-                    f"Одобри вручную в настройках группы."
-                )
+                logger.error(f"Ошибка одобрения: {e}\n{traceback.format_exc()}")
+                await query.edit_message_text(f"✅ Верифицирован, но не удалось автоматически одобрить. Одобри вручную.")
                 return
         
-        # Уведомляем пользователя
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="✅ Верификация пройдена! Теперь ты можешь зайти в группу. Добро пожаловать! 🎉"
-            )
+            await context.bot.send_message(chat_id=user_id, text="✅ Верификация пройдена! Добро пожаловать! 🎉")
         except Exception as e:
-            logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
+            logger.error(f"Не удалось уведомить {user_id}: {e}")
         
-        await query.edit_message_text(
-            f"✅ Пользователь {user_id} верифицирован и заявка одобрена."
-        )
+        await query.edit_message_text(f"✅ Пользователь {user_id} верифицирован и заявка одобрена.")
         
     elif action == "reject":
-        # Отклоняем пользователя в БД
         update_user_status(user_id, 'rejected', update.effective_user.id, "Не указана")
         
-        # Отклоняем заявку на вступление
         if group_chat_id:
             try:
-                await context.bot.decline_chat_join_request(
-                    chat_id=group_chat_id,
-                    user_id=user_id
-                )
-                logger.info(f"❌ Заявка пользователя {user_id} отклонена в группе {group_chat_id}")
+                await context.bot.decline_chat_join_request(chat_id=group_chat_id, user_id=user_id)
+                logger.info(f"❌ Заявка {user_id} отклонена в группе {group_chat_id}")
             except Exception as e:
-                logger.error(f"Ошибка отклонения заявки: {e}")
+                logger.error(f"Ошибка отклонения: {e}")
         
-        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="❌ К сожалению, верификация отклонена.\n\n"
-                     "Возможные причины:\n"
-                     "- Несоответствие возраста\n"
-                     "- Плохое качество кружка\n"
-                     "- Смайлик не виден\n\n"
-                     "Подай заявку снова, чтобы попробовать ещё раз."
+                text="❌ Верификация отклонена.\n\nВозможные причины:\n- Несоответствие возраста\n- Плохое качество кружка\n- Смайлик не виден\n\nПодай заявку снова."
             )
         except Exception as e:
-            logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
+            logger.error(f"Не удалось уведомить {user_id}: {e}")
         
-        await query.edit_message_text(
-            f"❌ Пользователь {user_id} отклонён."
-        )
-
-# ==================== КОМАНДЫ АДМИНА ====================
+        await query.edit_message_text(f"❌ Пользователь {user_id} отклонён.")
 
 async def admin_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение информации о пользователе по ID"""
     if not is_admin(update.effective_user.id):
         return
-    
     if not context.args:
         await update.message.reply_text("Использование: /info <user_id>")
         return
-    
     try:
         user_id = int(context.args[0])
         user_data = get_user(user_id)
-        
         if not user_data:
-            await update.message.reply_text("Пользователь не найден в базе.")
+            await update.message.reply_text("Пользователь не найден.")
             return
         
-        status_emoji = {
-            'pending': '⏳',
-            'verified': '✅',
-            'rejected': '❌'
-        }
-        
+        status_emoji = {'pending': '⏳', 'verified': '✅', 'rejected': '❌'}
         text = (
-            f"📊 Информация о пользователе:\n\n"
-            f"🆔 ID: {user_data['user_id']}\n"
+            f"📊 Информация:\n\n🆔 ID: {user_data['user_id']}\n"
             f"👤 Имя: {user_data['first_name']} {user_data['last_name'] or ''}\n"
             f"📛 Username: @{user_data['username'] or 'нет'}\n"
-            f"📅 Дата рождения: {user_data['birthdate']}\n"
-            f"🔢 Возраст: {user_data['age']}\n"
+            f"📅 ДР: {user_data['birthdate']}\n🔢 Возраст: {user_data['age']}\n"
             f"😀 Смайлик: {user_data['emoji']}\n"
-            f"👥 Группа: {user_data['group_chat_id'] or 'не указана'}\n"
             f"📌 Статус: {status_emoji.get(user_data['status'], '❓')} {user_data['status']}\n"
-            f"📅 Дата регистрации: {user_data['created_at']}\n"
+            f"📅 Регистрация: {user_data['created_at']}\n"
         )
-        
         if user_data['verification_date']:
             text += f"✅ Дата верификации: {user_data['verification_date']}\n"
         if user_data['rejection_reason']:
-            text += f"❌ Причина отклонения: {user_data['rejection_reason']}\n"
-        
+            text += f"❌ Причина: {user_data['rejection_reason']}\n"
         await update.message.reply_text(text)
-        
     except ValueError:
-        await update.message.reply_text("Неверный формат ID. Используй только цифры.")
+        await update.message.reply_text("Неверный формат ID.")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Статистика по пользователям"""
     if not is_admin(update.effective_user.id):
         return
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
     cursor.execute("SELECT COUNT(*) FROM users WHERE status = 'verified'")
     verified = cursor.fetchone()[0]
-    
     cursor.execute("SELECT COUNT(*) FROM users WHERE status = 'rejected'")
     rejected = cursor.fetchone()[0]
-    
     cursor.execute("SELECT COUNT(*) FROM users WHERE status = 'pending'")
     pending = cursor.fetchone()[0]
-    
     cursor.execute("SELECT COUNT(*) FROM users")
     total = cursor.fetchone()[0]
-    
     conn.close()
-    
-    await update.message.reply_text(
-        f"📊 Статистика верификации:\n\n"
-        f"✅ Подтверждено: {verified}\n"
-        f"❌ Отклонено: {rejected}\n"
-        f"⏳ Ожидает: {pending}\n"
-        f"📊 Всего: {total}"
-    )
+    await update.message.reply_text(f"📊 Статистика:\n✅ {verified}\n❌ {rejected}\n⏳ {pending}\n📊 Всего: {total}")
 
 async def admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Список всех пользователей"""
     if not is_admin(update.effective_user.id):
         return
-    
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, first_name, status, created_at FROM users ORDER BY created_at DESC LIMIT 20")
     rows = cursor.fetchall()
     conn.close()
-    
     if not rows:
-        await update.message.reply_text("База данных пуста.")
+        await update.message.reply_text("База пуста.")
         return
-    
-    text = "📋 Последние 20 пользователей:\n\n"
+    text = "📋 Последние 20:\n\n"
     for row in rows:
         status = {'pending': '⏳', 'verified': '✅', 'rejected': '❌'}.get(row['status'], '❓')
         text += f"{status} {row['first_name']} (ID: {row['user_id']}) - {row['created_at'][:10]}\n"
-    
     await update.message.reply_text(text)
 
-# ==================== ОБРАБОТЧИК ОШИБОК ====================
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Глобальный обработчик ошибок"""
     logger.error(f"Exception: {context.error}\n{traceback.format_exc()}")
     if update and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "⚠️ Произошла ошибка. Попробуй /start или обратись к администратору."
-            )
+            await update.effective_message.reply_text("⚠️ Ошибка. Попробуй /start.")
         except Exception:
             pass
 
-# ==================== ЗАПУСК ====================
+# ==================== ЗАПУСК (WEBHOOK) ====================
 
 def main():
-    # Инициализация БД
     init_db()
     
-    # Проверяем обязательные настройки
     if not TOKEN:
         logger.error("❌ TOKEN не задан!")
         return
     
     if not GROUP_CHAT_ID:
-        logger.warning("⚠️ GROUP_CHAT_ID не задан! Бот не сможет одобрять заявки.")
+        logger.warning("⚠️ GROUP_CHAT_ID не задан! Авто-одобрение не будет работать.")
     
     if not ADMIN_IDS and not MODERATION_CHAT_ID:
-        logger.warning("⚠️ ADMIN_IDS и MODERATION_CHAT_ID не заданы! Админы не получат уведомления.")
-    
-    # Создаём приложение
+        logger.warning("⚠️ ADMIN_IDS и MODERATION_CHAT_ID не заданы!")
+
     application = Application.builder().token(TOKEN).build()
     
-    # Conversation handler для верификации
-    # CRITICAL: per_chat=False — заявка приходит из группы, ответы — в ЛС citeweb_search:1#5
     conv_handler = ConversationHandler(
         entry_points=[
             ChatJoinRequestHandler(handle_join_request, chat_id=int(GROUP_CHAT_ID) if GROUP_CHAT_ID else None),
@@ -609,11 +462,10 @@ def main():
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_chat=False,  # Важно: отслеживаем состояние по user_id, а не по chat_id
+        per_chat=False,
         per_user=True,
     )
     
-    # Регистрация обработчиков
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^(approve|reject)_"))
     application.add_handler(CommandHandler("info", admin_info))
@@ -621,42 +473,26 @@ def main():
     application.add_handler(CommandHandler("list", admin_list))
     application.add_error_handler(error_handler)
     
-    # Веб-сервер для Render
-    import asyncio
-    from aiohttp import web
-    
-    async def health_check(request):
-        return web.Response(text="Bot is running!")
-    
-    async def start_web_server():
-        app = web.Application()
-        app.router.add_get('/', health_check)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        logger.info("🌐 Web server on port 8080")
-    
-    async def main_async():
-        await start_web_server()
+    # Webhook вместо polling — решает проблему Conflict на Render
+    if RENDER_EXTERNAL_HOSTNAME:
+        webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
+        logger.info(f"🌐 Запуск webhook: {webhook_url}")
         
-        await application.initialize()
-        await application.start()
-        # Важно: allowed_updates должен включать chat_join_request
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info("🤖 Бот запущен!")
-        
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            logger.info("🛑 Остановка бота...")
-            await application.stop()
-            await application.shutdown()
-    
-    asyncio.run(main_async())
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=webhook_url,
+            secret_token="your_secret_token_here",  # Замените на случайную строку
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+    else:
+        # Локальный запуск (для тестов)
+        logger.info("🔄 Локальный запуск через polling...")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
 
 if __name__ == "__main__":
     main()
