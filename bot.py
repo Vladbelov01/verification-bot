@@ -471,7 +471,35 @@ def main():
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("list", admin_list))
     
-    # Запуск
-        print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Запускаем бота и веб-сервер для Render
+    import asyncio
+    from aiohttp import web
+    
+    async def health_check(request):
+        return web.Response(text="Bot is running!")
+    
+    async def start_web_server():
+        app = web.Application()
+        app.router.add_get('/', health_check)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        print("🌐 Web server on port 8080")
+    
+    async def start_bot():
+        print("🤖 Бот запущен!")
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    
+    async def main_async():
+        await start_web_server()
+        await start_bot()
+        while True:
+            await asyncio.sleep(3600)
+    
+    asyncio.run(main_async())
 
+if __name__ == "__main__":
+    main()
