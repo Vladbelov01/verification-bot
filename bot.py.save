@@ -27,13 +27,14 @@ from telegram.constants import ChatType
 # Токен бота (получить у @BotFather)
 TOKEN = os.environ.get("TOKEN", "")
 # ID администраторов (узнать через @userinfobot или @getidsbot)
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "0").split(",") if x]  # Замени на реальные ID
+ADMIN_IDS = [int(os.environ.get("ADMIN_IDS", "0"))]  # Замени на реальные ID
 
 # Ссылка на приватную группу (пригласительная ссылка)
 PRIVATE_GROUP_LINK = os.environ.get("PRIVATE_GROUP_LINK", "")  # Замени на реальную ссылку
 
 # ID чата для пересылки кружочков (None = отправлять админам в ЛС)
-MODERATION_CHAT_ID = os.environ.get("MODERATION_CHAT_ID", "")
+MODERATION_CHAT_ID = os.envirion.get("MODERATION_CHAT_ID", "")
+
 
 # Файл базы данных
 DB_FILE = "verification_bot.db"
@@ -133,7 +134,9 @@ def calculate_age(birthdate: str) -> int:
 def generate_emoji() -> str:
     hand_emojis = [
         "👍", "👎", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙",
-        "👈", "👆", "🖕", "👇", "☝️", "🤚", "🖐️", "🖖", "🫰"
+        "👈", "👉", "👆", "🖕", "👇", "☝️", "👋", "🤚", "🖐️", "✋",
+        "🖖", "👐", "🙌", "🤲", "🙏", "✍️", "💪", "🤝", "🫱", "🫲",
+        "🫳", "🫴", "👊", "🤛", "🤜", "🫰", "🤳"
     ]
     return random.choice(hand_emojis)
 
@@ -472,32 +475,8 @@ def main():
     application.add_handler(CommandHandler("list", admin_list))
     
     # Запуск
-        import asyncio
-    from aiohttp import web
-    
-    async def health_check(request):
-        return web.Response(text="Bot is running!")
-    
-    async def start_bot():
-        print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    
-    async def main_web():
-        app = web.Application()
-        app.router.add_get('/', health_check)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8080)
-        await site.start()
-        print("🌐 Web server started on port 8080")
-        
-        await start_bot()
-        
-        # Держим бота запущенным
-        while True:
-            await asyncio.sleep(3600)
-    
-    asyncio.run(main_web())
+    print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+if __name__ == "__main__":
+    main()
