@@ -87,7 +87,7 @@ def get_user(user_id: int) -> dict:
     return dict(row) if row else None
 
 def get_pending_users() -> list:
-    """Получить всех пользователей со статусом pending (для обработки накопившихся заявок)"""
+    """Получить всех пользователей со статусом pending"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -194,25 +194,21 @@ async def send_to_moderation(context: ContextTypes.DEFAULT_TYPE, user, moderatio
 # ==================== ОБРАБОТКА НАКОПИВШИХСЯ ЗАЯВОК ====================
 
 async def process_pending_users(application: Application):
-    """
-    Обрабатывает накопившиеся заявки при старте бота.
-    Отправляет напоминание пользователям со статусом 'pending' продолжить верификацию.
-    """
+    """Обрабатывает накопившиеся заявки при старте бота"""
     logger.info("🔍 Проверка накопившихся заявок...")
     
     pending_users = get_pending_users()
     
     if not pending_users:
-        logger.info("✅ Нет накопившихся заявок")
+        logger.info("✅ Нет накопившихся заявок в БД")
         return
     
-    logger.info(f"📋 Найдено {len(pending_users)} незавершённых верификаций")
+    logger.info(f"📋 Найдено {len(pending_users)} незавершённых верификаций в БД")
     
     for user_data in pending_users:
         user_id = user_data['user_id']
         
         if not user_data.get('birthdate'):
-            # Шаг 1 - нет даты рождения
             try:
                 await application.bot.send_message(
                     chat_id=user_id,
@@ -224,14 +220,12 @@ async def process_pending_users(application: Application):
                 )
                 logger.info(f"📨 Отправлено напоминание (шаг 1) пользователю {user_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+                logger.error(f"Не удалось отправить пользователю {user_id}: {e}")
                 if "blocked" in str(e).lower() or "not found" in str(e).lower():
                     update_user_status(user_id, 'rejected', rejection_reason="Пользователь заблокировал бота")
         
         elif not user_data.get('emoji'):
-            # Шаг 2 - есть дата, но нет эмодзи
             emoji = generate_emoji()
-            
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET emoji = ? WHERE user_id = ?", (emoji, user_id))
@@ -251,10 +245,9 @@ async def process_pending_users(application: Application):
                 )
                 logger.info(f"📨 Отправлено напоминание (шаг 2) пользователю {user_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+                logger.error(f"Не удалось отправить пользователю {user_id}: {e}")
         
         else:
-            # Есть и дата, и эмодзи — ждём кружок
             emoji = user_data.get('emoji', '❓')
             try:
                 await application.bot.send_message(
@@ -270,32 +263,60 @@ async def process_pending_users(application: Application):
                 )
                 logger.info(f"📨 Отправлено напоминание (ожидание кружка) пользователю {user_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+                logger.error(f"Не удалось отправить пользователю {user_id}: {e}")
 
-# ==================== ОТЛАДКА ====================
+# ==================== ОТЛАДКА ГРУППЫ ====================
 
 async def debug_check_bot_status(application: Application):
-    """Проверяем статус бота в группе"""
-    if GROUP_CHAT_ID:
+    """Проверяем статус бота в группе через API"""
+    if not GROUP_CHAT_ID:
+        logger.warning("⚠️ GROUP_CHAT_ID не задан, пропускаем проверку группы")
+        return
+    
+    try:
+        chat_id = int(GROUP_CHAT_ID)
+        
+        # Получаем информацию о группе
+        chat = await application.bot.get_chat(chat_id)
+        logger.info(f"✅ Бот видит группу: {chat.title} (ID: {chat.id}, type: {chat.type})")
+        
+        # Проверяем статус бота в группе
+        bot_member = await application.bot.get_chat_member(chat_id, application.bot.id)
+        logger.info(f"🤖 Статус бота в группе: {bot_member.status}")
+        
+        if bot_member.status != 'administrator':
+            logger.error(f"❌❌❌ БОТ НЕ АДМИНИСТРАТОР В ГРУППЕ! Статус: {bot_member.status}")
+            logger.error(f"❌❌❌ ChatJoinRequest НЕ БУДЕТ РАБОТАТЬ! Назначь бота админом!")
+            return
+        
+        # Проверяем права админа
+        if hasattr(bot_member, 'can_invite_users'):
+            logger.info(f"🤖 can_invite_users: {bot_member.can_invite_users}")
+        if hasattr(bot_member, 'can_restrict_members'):
+            logger.info(f"🤖 can_restrict_members: {bot_member.can_restrict_members}")
+        
+        # Проверяем, включены ли заявки на вступление
+        # Пробуем получить chat_join_request — если нет прав, упадёт с ошибкой
         try:
-            chat_id = int(GROUP_CHAT_ID)
-            chat = await application.bot.get_chat(chat_id)
-            logger.info(f"✅ Бот видит группу: {chat.title} (ID: {chat.id})")
-            
-            bot_member = await application.bot.get_chat_member(chat_id, application.bot.id)
-            logger.info(f"🤖 Статус бота в группе: {bot_member.status}")
-            logger.info(f"🤖 Права бота: {bot_member.to_dict()}")
-            
+            # Это не прямой метод, но можно проверить через get_chat
+            logger.info(f"🤖 Проверка настроек группы...")
+            logger.info(f"🤖 invite_link: {chat.invite_link}")
+            logger.info(f"🤖 has_protected_content: {getattr(chat, 'has_protected_content', 'N/A')}")
         except Exception as e:
-            logger.error(f"❌ Не удалось проверить группу: {e}")
+            logger.warning(f"⚠️ Не удалось получить доп. инфо: {e}")
+        
+        logger.info(f"✅ Бот админ в группе, ChatJoinRequest должен работать")
+        
+    except Exception as e:
+        logger.error(f"❌ Не удалось проверить группу: {e}")
+        logger.error(f"❌ traceback: {traceback.format_exc()}")
 
 # ==================== ОБРАБОТЧИКИ ====================
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ОБРАБОТКА ЗАЯВОК НА ВСТУПЛЕНИЕ"""
     
-    # МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ — видим всё, что приходит
-    logger.info(f"🚨 ChatJoinRequest ПОЛУЧЕН! update_type={type(update)}")
+    logger.info(f"🚨 ChatJoinRequest ПОЛУЧЕН! update={update}")
     logger.info(f"🚨 update.chat_join_request = {update.chat_join_request}")
     
     try:
@@ -309,7 +330,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     logger.info(f"👤 Пользователь {user.id} (@{user.username}) подал заявку в группу {chat.id} ({chat.title})")
 
-    # ФИЛЬТРАЦИЯ ПО GROUP_CHAT_ID — сохраняем как просили
+    # ФИЛЬТРАЦИЯ ПО GROUP_CHAT_ID
     if GROUP_CHAT_ID:
         try:
             expected_chat_id = int(GROUP_CHAT_ID)
@@ -363,13 +384,16 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"❌ traceback: {traceback.format_exc()}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/start — точка входа для пользователей"""
     user = update.effective_user
     user_data = get_user(user.id)
 
+    # Уже верифицирован
     if user_data and user_data['status'] == 'verified':
         await update.message.reply_text("✅ Ты уже прошёл верификацию!")
         return ConversationHandler.END
 
+    # Отклонён
     if user_data and user_data['status'] == 'rejected':
         keyboard = []
         if ADMIN_IDS:
@@ -381,7 +405,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # Если уже в процессе верификации — продолжаем с того места, где остановились
+    # Уже в процессе — продолжаем
     if user_data and user_data['status'] == 'pending':
         if not user_data.get('birthdate'):
             await update.message.reply_text(
@@ -428,10 +452,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return STATE_VIDEO_NOTE
 
-    await update.message.reply_text(
-        "👋 Привет! Это бот для верификации перед вступлением в приватную группу.\n\n"
-        "Чтобы начать, подай заявку на вступление в группу — бот автоматически напишет тебе."
-    )
+    # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ ИЛИ НЕТ ЗАЯВКИ ===
+    # Если GROUP_CHAT_ID задан — предлагаем подать заявку
+    # Иначе сразу начинаем верификацию (для тестов)
+    if GROUP_CHAT_ID:
+        await update.message.reply_text(
+            "👋 Привет! Это бот для верификации перед вступлением в приватную группу.\n\n"
+            "📋 Чтобы начать:\n"
+            "1. Подай заявку на вступление в группу\n"
+            "2. Бот автоматически напишет тебе для верификации\n\n"
+            "⚠️ Если бот не написал после заявки — напиши мне снова /start"
+        )
+    else:
+        # Для тестов без группы — сразу начинаем верификацию
+        await update.message.reply_text(
+            "👋 Привет! Начинаем верификацию.\n\n"
+            "Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+            "Пример: 15.03.1995"
+        )
+        return STATE_BIRTHDATE
+    
     return ConversationHandler.END
 
 async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,7 +635,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         else:
-            logger.warning(f"⚠️ group_chat_id не найден для пользователя {user_id}, одобряем только в боте")
+            logger.warning(f"⚠️ group_chat_id не найден для пользователя {user_id}")
 
         try:
             await context.bot.send_message(chat_id=user_id, text="✅ Верификация пройдена! Добро пожаловать! 🎉")
@@ -728,6 +768,13 @@ async def admin_process_pending(update: Update, context: ContextTypes.DEFAULT_TY
     await process_pending_users(context.application)
     await update.message.reply_text("✅ Обработка завершена!")
 
+async def admin_check_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки статуса бота в группе"""
+    if not is_admin(update.effective_user.id):
+        return
+    await debug_check_bot_status(context.application)
+    await update.message.reply_text("✅ Проверка группы выполнена, смотри логи!")
+
 # ==================== ОБРАБОТЧИК ОШИБОК ====================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -782,7 +829,6 @@ def main():
     )
 
     # ChatJoinRequestHandler ВНЕ ConversationHandler — отдельно!
-    # С фильтрацией по GROUP_CHAT_ID внутри handle_join_request
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
 
     application.add_handler(conv_handler)
@@ -793,6 +839,7 @@ def main():
     application.add_handler(CommandHandler("list", admin_list))
     application.add_handler(CommandHandler("reset", admin_reset))
     application.add_handler(CommandHandler("process_pending", admin_process_pending))
+    application.add_handler(CommandHandler("check_group", admin_check_group))
     application.add_error_handler(error_handler)
 
     # Webhook — для Render
@@ -813,7 +860,7 @@ def main():
             webhook_url=webhook_url,
             secret_token=WEBHOOK_SECRET,
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=False  # НЕ сбрасываем pending, чтобы не потерять заявки
+            drop_pending_updates=False
         )
     else:
         # Локальный запуск (для тестов)
@@ -828,7 +875,7 @@ def main():
         
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=False  # НЕ сбрасываем pending
+            drop_pending_updates=False
         )
 
 if __name__ == "__main__":
