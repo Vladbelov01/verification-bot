@@ -820,10 +820,11 @@ def main():
                 MessageHandler(
                     filters.ALL & ~filters.VIDEO_NOTE & ~filters.COMMAND & filters.ChatType.PRIVATE,
                     wrong_message_in_video_state
-                )
+                ),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,  # ← позволяет перезапустить /start в любой момент
         per_chat=False,
         per_user=True,
     )
@@ -842,37 +843,76 @@ def main():
     application.add_handler(CommandHandler("check_group", admin_check_group))
     application.add_error_handler(error_handler)
 
-    # Webhook — для Render
+    # Webhook — для Render (с health check)
     if RENDER_EXTERNAL_HOSTNAME:
         webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
-        logger.info(f"🌐 Запуск webhook: {webhook_url}")
 
         async def post_init(app: Application):
             logger.info("🚀 Бот инициализирован, проверяем настройки...")
             await debug_check_bot_status(app)
             await process_pending_users(app)
-        
+
         application.post_init = post_init
 
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=False
-        )
+        async def health(request):
+            """Health check для Render — отвечаем 200 OK на корневой запрос"""
+            return web.Response(text="OK", status=200)
+
+        async def telegram_webhook(request):
+            """Обработка входящих webhook-запросов от Telegram"""
+            # Проверяем secret token
+            token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if token != WEBHOOK_SECRET:
+                return web.Response(status=403)
+
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(status=200)
+
+        async def run_server():
+            # Инициализируем и стартуем приложение PTB
+            await application.initialize()
+            await application.start()
+
+            # Устанавливаем webhook в Telegram
+            await application.bot.set_webhook(
+                url=webhook_url,
+                secret_token=WEBHOOK_SECRET,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False
+            )
+
+            # Создаём aiohttp сервер
+            aio_app = web.Application()
+            aio_app.router.add_get("/", health)           # ← Render health check
+            aio_app.router.add_post("/webhook", telegram_webhook)
+
+            runner = web.AppRunner(aio_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", PORT)
+            await site.start()
+
+            logger.info(f"🌐 Сервер запущен: {webhook_url}")
+            logger.info(f"🌐 Health check: https://{RENDER_EXTERNAL_HOSTNAME}/")
+            logger.info("✅ Бот работает. Ожидаем запросы...")
+
+            # Держим процесс живым бесконечно
+            await asyncio.Event().wait()
+
+        asyncio.run(run_server())
+
     else:
         # Локальный запуск (для тестов)
         logger.info("🔄 Локальный запуск через polling...")
-        
+
         async def post_init(app: Application):
             logger.info("🚀 Бот инициализирован, проверяем настройки...")
             await debug_check_bot_status(app)
             await process_pending_users(app)
-        
+
         application.post_init = post_init
-        
+
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=False
