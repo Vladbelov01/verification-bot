@@ -524,7 +524,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"❌ traceback: {traceback.format_exc()}")
 
 async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отслеживаем изменения статуса участников в ОБЕИХ группах"""
+    """Отслеживаем вход/выход ТОЛЬКО в админской группе"""
     if not update.chat_member:
         return
     
@@ -533,37 +533,13 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     new_member = chat_member.new_chat_member
     old_member = chat_member.old_chat_member
     
+    # Игнорируем самого бота
     if new_member.user.id == context.bot.id:
         return
     
-    # ===== ОСНОВНАЯ ГРУППА =====
-    if GROUP_CHAT_ID and chat.id == int(GROUP_CHAT_ID):
-        if old_member.status != 'administrator' and new_member.status == 'administrator':
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Добавить в админы бота", callback_data=f"addadmin_{new_member.user.id}")]
-            ])
-            text = (
-                f"👤 Пользователь {new_member.user.first_name} "
-                f"(@{new_member.user.username or 'нет'}) теперь администратор в основной группе.\n\n"
-                f"Добавить его в администрацию бота?"
-            )
-            await send_to_admins(context, text, keyboard)
-            logger.info(f"📨 Предложено добавить админа {new_member.user.id} (основная группа)")
-        
-        elif old_member.status == 'administrator' and new_member.status in ('member', 'restricted', 'left', 'kicked'):
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➖ Удалить из админов бота", callback_data=f"removeadmin_{new_member.user.id}")]
-            ])
-            text = (
-                f"👤 Администратор {new_member.user.first_name} "
-                f"(@{new_member.user.username or 'нет'}) покинул основную группу или снят с админа.\n\n"
-                f"Удалить его из администрации бота?"
-            )
-            await send_to_admins(context, text, keyboard)
-            logger.info(f"📨 Предложено удалить админа {new_member.user.id} (основная группа)")
-    
-    # ===== АДМИНСКАЯ ГРУППА =====
+    # ===== ТОЛЬКО АДМИНСКАЯ ГРУППА =====
     if MODERATION_CHAT_ID and chat.id == int(MODERATION_CHAT_ID):
+        # Вошёл в админскую группу
         if old_member.status in ('left', 'kicked') and new_member.status in ('member', 'administrator', 'restricted', 'creator'):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Добавить в админы бота", callback_data=f"addadmin_{new_member.user.id}")]
@@ -578,6 +554,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_to_admins(context, text, keyboard)
             logger.info(f"📨 Предложено добавить {new_member.user.id} (вход в админскую группу)")
         
+        # Вышел из админской группы
         elif old_member.status in ('member', 'administrator', 'restricted', 'creator') and new_member.status in ('left', 'kicked'):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➖ Удалить из админов бота", callback_data=f"removeadmin_{new_member.user.id}")]
@@ -989,7 +966,7 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         birthdate=text,
         age=age,
         status='pending'
-    )
+    
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1488,7 +1465,7 @@ def main():
     )
 
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
-    application.add_handler(ChatMemberHandler(handle_chat_member, chat_member=True))
+    application.add_handler(ChatMemberHandler(handle_chat_member))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(approve|reject)_\d+$"))
     application.add_handler(CallbackQueryHandler(retry_callback, pattern=r"^retry_\d+$"))
