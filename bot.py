@@ -134,6 +134,17 @@ def init_db():
         )
     ''')
     
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            reason TEXT,
+            banned_by INTEGER,
+            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     for col in ['verification_method', 'doc_code']:
         try:
             cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
@@ -221,6 +232,33 @@ def update_user_status(user_id, status, admin_id=None, rejection_reason=None):
             UPDATE users SET status = ?, admin_id = ?
             WHERE user_id = ?
         ''', (status, admin_id, user_id))
+    conn.commit()
+    conn.close()
+
+# ==================== БАН ====================
+
+def is_banned(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def ban_user(user_id, username, first_name, reason, banned_by):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO banned_users (user_id, username, first_name, reason, banned_by)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, username, first_name, reason, banned_by))
+    conn.commit()
+    conn.close()
+
+def unban_user(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 
@@ -455,6 +493,19 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     logger.info(f"👤 Пользователь {user.id} (@{user.username}) подал заявку в группу {chat.id} ({chat.title})")
 
+    # === ПРОВЕРКА БАНА ===
+    if is_banned(user.id):
+        try:
+            await join_request.decline()
+            logger.info(f"🚫 Авто-отклонение забаненного пользователя {user.id}")
+        except Exception as e:
+            logger.error(f"Ошибка отклонения забаненного: {e}")
+        try:
+            await context.bot.send_message(chat_id=user.id, text="🚫 Ты заблокирован и не можешь подавать заявки.")
+        except Exception:
+            pass
+        return
+
     if GROUP_CHAT_ID:
         try:
             expected_chat_id = int(GROUP_CHAT_ID)
@@ -564,6 +615,11 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_data = get_user(user.id)
+
+    # Проверка бана при /start
+    if is_banned(user.id):
+        await update.message.reply_text("🚫 Ты заблокирован. Обратись к администрации.")
+        return ConversationHandler.END
 
     if user_data and user_data['status'] == 'verified':
         await update.message.reply_text("✅ Ты уже прошёл верификацию!")
@@ -706,6 +762,10 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = update.effective_user
     user_data = get_user(user.id)
     
+    if is_banned(user.id):
+        await query.edit_message_text("🚫 Ты заблокирован.")
+        return ConversationHandler.END
+
     if user_data and user_data['status'] == 'verified':
         await query.edit_message_text("✅ Ты уже прошёл верификацию!")
         return ConversationHandler.END
@@ -977,11 +1037,12 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    group_chat_id = context.user_data.get('group_chat_id')
-    if not group_chat_id:
-        user_db = get_user(user.id)
-        if user_db:
-            group_chat_id = user_db.get('group_chat_id')
+    # Fallback: если context.user_data пустой (бот перезагрузился), тянем из БД
+    user_db = get_user(user.id)
+    group_chat_id = context.user_data.get('group_chat_id') or (user_db.get('group_chat_id') if user_db else None)
+    birthdate = context.user_data.get('birthdate') or (user_db.get('birthdate') if user_db else None)
+    age = context.user_data.get('age') or (user_db.get('age') if user_db else None)
+    emoji = context.user_data.get('emoji') or (user_db.get('emoji') if user_db else None)
 
     try:
         save_user(
@@ -990,9 +1051,9 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
             first_name=user.first_name,
             last_name=user.last_name,
             group_chat_id=group_chat_id,
-            birthdate=context.user_data.get('birthdate'),
-            age=context.user_data.get('age'),
-            emoji=context.user_data.get('emoji'),
+            birthdate=birthdate,
+            age=age,
+            emoji=emoji,
             verification_method='video',
             status='pending'
         )
@@ -1013,9 +1074,9 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 Пользователь: {user.first_name} {user.last_name or ''}\n"
         f"🆔 ID: {user.id}\n"
         f"📛 Username: @{user.username or 'нет'}\n"
-        f"📅 Дата рождения: {context.user_data.get('birthdate')}\n"
-        f"🔢 Возраст: {context.user_data.get('age')} лет\n"
-        f"😀 Смайлик: {context.user_data.get('emoji')}\n"
+        f"📅 Дата рождения: {birthdate}\n"
+        f"🔢 Возраст: {age} лет\n"
+        f"😀 Смайлик: {emoji}\n"
         f"👥 Группа: {group_chat_id or 'не указана'}\n\n"
         f"Проверь кружок и нажми решение:"
     )
@@ -1035,13 +1096,12 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_document_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    group_chat_id = context.user_data.get('group_chat_id')
-    if not group_chat_id:
-        user_db = get_user(user.id)
-        if user_db:
-            group_chat_id = user_db.get('group_chat_id')
-
-    doc_code = context.user_data.get('doc_code') or (get_user(user.id) or {}).get('doc_code', '❓')
+    # Fallback: если context.user_data пустой (бот перезагрузился), тянем из БД
+    user_db = get_user(user.id)
+    group_chat_id = context.user_data.get('group_chat_id') or (user_db.get('group_chat_id') if user_db else None)
+    birthdate = context.user_data.get('birthdate') or (user_db.get('birthdate') if user_db else None)
+    age = context.user_data.get('age') or (user_db.get('age') if user_db else None)
+    doc_code = context.user_data.get('doc_code') or (user_db.get('doc_code') if user_db else '❓')
     
     try:
         save_user(
@@ -1050,8 +1110,8 @@ async def get_document_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
             first_name=user.first_name,
             last_name=user.last_name,
             group_chat_id=group_chat_id,
-            birthdate=context.user_data.get('birthdate'),
-            age=context.user_data.get('age'),
+            birthdate=birthdate,
+            age=age,
             verification_method='document',
             doc_code=doc_code,
             status='pending'
@@ -1073,8 +1133,8 @@ async def get_document_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"👤 Пользователь: {user.first_name} {user.last_name or ''}\n"
         f"🆔 ID: {user.id}\n"
         f"📛 Username: @{user.username or 'нет'}\n"
-        f"📅 Дата рождения: {context.user_data.get('birthdate')}\n"
-        f"🔢 Возраст: {context.user_data.get('age')} лет\n"
+        f"📅 Дата рождения: {birthdate}\n"
+        f"🔢 Возраст: {age} лет\n"
         f"📝 Код на фото: {doc_code}\n"
         f"👥 Группа: {group_chat_id or 'не указана'}\n\n"
         f"Проверь документ и нажми решение:"
@@ -1391,6 +1451,56 @@ async def admin_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text)
 
+async def admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /ban <user_id> [причина]")
+        return
+    try:
+        user_id = int(context.args[0])
+        reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Не указана"
+        
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.username
+            first_name = user.first_name
+        except:
+            username = None
+            first_name = None
+        
+        ban_user(user_id, username, first_name, reason, update.effective_user.id)
+        
+        # Если есть активная заявка — отклоняем
+        user_data = get_user(user_id)
+        if user_data and user_data.get('group_chat_id'):
+            try:
+                await context.bot.decline_chat_join_request(chat_id=user_data['group_chat_id'], user_id=user_id)
+            except Exception as e:
+                logger.error(f"Ошибка отклонения заявки забаненного: {e}")
+        
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"🚫 Ты заблокирован.\nПричина: {reason}")
+        except Exception:
+            pass
+        
+        await update.message.reply_text(f"🚫 Пользователь {user_id} заблокирован.\nПричина: {reason}")
+    except ValueError:
+        await update.message.reply_text("Неверный формат ID.")
+
+async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /unban <user_id>")
+        return
+    try:
+        user_id = int(context.args[0])
+        unban_user(user_id)
+        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован.")
+    except ValueError:
+        await update.message.reply_text("Неверный формат ID.")
+
 # ==================== ОБРАБОТЧИК ОШИБОК ====================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1455,14 +1565,17 @@ def main():
         per_user=True,
     )
 
+    # === ИСПРАВЛЕНО: ChatMemberHandler теперь правильно отслеживает других пользователей ===
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
-    application.add_handler(ChatMemberHandler(handle_chat_member))
+    application.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(approve|reject)_\d+$"))
     application.add_handler(CallbackQueryHandler(retry_callback, pattern=r"^retry_\d+$"))
     application.add_handler(CallbackQueryHandler(add_admin_callback, pattern=r"^addadmin_\d+$"))
     application.add_handler(CallbackQueryHandler(remove_admin_callback, pattern=r"^removeadmin_\d+$"))
     
+    # Админские команды — работают в ЛС и в группах
     application.add_handler(CommandHandler("info", admin_info))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("list", admin_list))
@@ -1472,6 +1585,8 @@ def main():
     application.add_handler(CommandHandler("addadmin", admin_addadmin))
     application.add_handler(CommandHandler("removeadmin", admin_removeadmin))
     application.add_handler(CommandHandler("listadmins", admin_listadmins))
+    application.add_handler(CommandHandler("ban", admin_ban))
+    application.add_handler(CommandHandler("unban", admin_unban))
     application.add_error_handler(error_handler)
 
     if RENDER_EXTERNAL_HOSTNAME:
