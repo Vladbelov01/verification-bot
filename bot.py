@@ -47,28 +47,24 @@ DB_FILE = "verification_bot.db"
 
 # ==================== ЗАЩИТА ====================
 
-# Разрешённые IP-сети Telegram (IPv4)
 TELEGRAM_IPS = [
     '149.154.160.0/20', '91.108.4.0/22', '91.108.8.0/22',
     '91.108.16.0/22', '91.108.56.0/22', '91.108.112.0/22',
     '149.154.168.0/22', '149.154.176.0/20'
 ]
 
-# Хранилище для rate limit (ip: [timestamps])
 request_counts = defaultdict(list)
 
 def get_client_ip(request) -> str:
-    """Получает реальный IP клиента (учитывает Render proxy)"""
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
         return forwarded.split(',')[0].strip()
     return request.remote or ""
 
 def is_telegram_ip(ip: str) -> bool:
-    """Проверяет, что запрос пришёл с IP Telegram"""
     if not ip:
         return False
-    ip = ip.split(':')[0]  # убираем порт если есть
+    ip = ip.split(':')[0]
     try:
         addr = ipaddress.ip_address(ip)
         for network in TELEGRAM_IPS:
@@ -79,11 +75,9 @@ def is_telegram_ip(ip: str) -> bool:
     return False
 
 def is_rate_limited(ip: str, max_requests: int = 10, window: int = 60) -> bool:
-    """Простой rate limiter в памяти"""
     if not ip:
         return False
     now = time.time()
-    # Чистим старые записи
     request_counts[ip] = [t for t in request_counts[ip] if now - t < window]
     if len(request_counts[ip]) >= max_requests:
         return True
@@ -106,7 +100,6 @@ logger = logging.getLogger(__name__)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    # WAL режим — для конкурентных запросов, база не блокируется
     conn.execute("PRAGMA journal_mode=WAL")
     cursor = conn.cursor()
     
@@ -533,7 +526,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     new_member = chat_member.new_chat_member
     old_member = chat_member.old_chat_member
     
-    # Игнорируем самого бота
     if new_member.user.id == context.bot.id:
         return
     
@@ -966,7 +958,7 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         birthdate=text,
         age=age,
         status='pending'
-    
+    )
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1430,7 +1422,6 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
 
-    # ConversationHandler для верификации
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -1483,7 +1474,6 @@ def main():
     application.add_handler(CommandHandler("listadmins", admin_listadmins))
     application.add_error_handler(error_handler)
 
-    # Webhook — для Render (с защитой)
     if RENDER_EXTERNAL_HOSTNAME:
         webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
 
@@ -1498,18 +1488,15 @@ def main():
             return web.Response(text="OK", status=200)
 
         async def telegram_webhook(request):
-            # === ЗАЩИТА 1: Secret Token ===
             token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
             if token != WEBHOOK_SECRET:
                 return web.Response(status=403)
             
-            # === ЗАЩИТА 2: IP Whitelist (только Telegram) ===
             peer_ip = get_client_ip(request)
             if not is_telegram_ip(peer_ip):
                 logger.warning(f"🚫 Запрос с неизвестного IP: {peer_ip}")
                 return web.Response(status=403)
             
-            # === ЗАЩИТА 3: Rate Limiting ===
             if is_rate_limited(peer_ip):
                 logger.warning(f"🚫 Rate limit для IP: {peer_ip}")
                 return web.Response(status=429)
@@ -1548,7 +1535,6 @@ def main():
         asyncio.run(run_server())
 
     else:
-        # Локальный запуск
         logger.info("🔄 Локальный запуск через polling...")
 
         async def post_init(app: Application):
