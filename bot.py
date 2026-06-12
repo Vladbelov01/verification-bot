@@ -356,16 +356,28 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Ошибка авто-одобрения: {e}")
         return
 
-    # Сохраняем group_chat_id
+    # === СОХРАНЯЕМ ПОЛЬЗОВАТЕЛЯ В БД ===
     context.user_data['group_chat_id'] = chat.id
     context.user_data['join_request_chat_id'] = chat.id
 
     if user_data:
+        # Старый пользователь — обновляем группу
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET group_chat_id = ? WHERE user_id = ?", (chat.id, user.id))
         conn.commit()
         conn.close()
+    else:
+        # НОВЫЙ пользователь — создаём запись, чтобы /start продолжил верификацию
+        save_user(
+            user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            group_chat_id=chat.id,
+            status='pending'
+        )
+        logger.info(f"💾 Новый пользователь {user.id} сохранён в БД")
 
     try:
         await context.bot.send_message(
@@ -375,7 +387,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"Для доступа нужно пройти верификацию.\n\n"
                 f"⚠️ Бот является посредником между тобой и администрацией. "
                 f"Твои данные и видеосообщения не хранятся на сервере, а лишь пересылаются администраторам для проверки.\n\n"
-                f"Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+                f"👉 Нажми /start, затем введи свою дату рождения в формате ДД.ММ.ГГГГ\n"
                 f"Пример: 15.03.1995"
             )
         )
