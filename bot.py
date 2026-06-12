@@ -379,6 +379,9 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         logger.info(f"💾 Новый пользователь {user.id} сохранён в БД")
 
+    # === ОТПРАВЛЯЕМ СООБЩЕНИЕ С КНОПКОЙ ===
+    keyboard = [[InlineKeyboardButton("👉 Начать верификацию", callback_data="start_verify")]]
+    
     try:
         await context.bot.send_message(
             chat_id=user.id,
@@ -386,12 +389,11 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"👋 Привет! Ты подал заявку на вступление в группу \"{chat.title}\".\n\n"
                 f"Для доступа нужно пройти верификацию.\n\n"
                 f"⚠️ Бот является посредником между тобой и администрацией. "
-                f"Твои данные и видеосообщения не хранятся на сервере, а лишь пересылаются администраторам для проверки.\n\n"
-                f"👉 Нажми /start, затем введи свою дату рождения в формате ДД.ММ.ГГГГ\n"
-                f"Пример: 15.03.1995"
-            )
+                f"Твои данные и видеосообщения не хранятся на сервере, а лишь пересылаются администраторам для проверки."
+            ),
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        logger.info(f"📨 Отправлено приветствие пользователю {user.id} для группы {chat.id}")
+        logger.info(f"📨 Отправлено приветствие с кнопкой пользователю {user.id} для группы {chat.id}")
     except Exception as e:
         logger.error(f"❌ Не удалось отправить сообщение пользователю {user.id}: {e}")
         logger.error(f"❌ traceback: {traceback.format_exc()}")
@@ -486,6 +488,82 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_BIRTHDATE
     
     return ConversationHandler.END
+
+async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатия кнопки 'Начать верификацию' из handle_join_request"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    user_data = get_user(user.id)
+    
+    # Уже верифицирован
+    if user_data and user_data['status'] == 'verified':
+        await query.edit_message_text("✅ Ты уже прошёл верификацию!")
+        return ConversationHandler.END
+
+    # Уже в процессе — продолжаем с нужного шага
+    if user_data and user_data['status'] == 'pending':
+        if not user_data.get('birthdate'):
+            await query.edit_message_text(
+                "⏳ Ты уже начал верификацию. Давай продолжим!\n\n"
+                "Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+                "Пример: 15.03.1995"
+            )
+            return STATE_BIRTHDATE
+        
+        elif not user_data.get('emoji'):
+            emoji = generate_emoji()
+            context.user_data['birthdate'] = user_data['birthdate']
+            context.user_data['age'] = user_data['age']
+            context.user_data['emoji'] = emoji
+            
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET emoji = ? WHERE user_id = ?", (emoji, user.id))
+            conn.commit()
+            conn.close()
+            
+            await query.edit_message_text(
+                f"⏳ Продолжаем верификацию!\n\n"
+                f"📅 Возраст: {user_data['age']} лет\n\n"
+                f"Шаг 2/2: Твой персональный смайлик: {emoji}\n\n"
+                f"Запиши кружок, где показываешь этот смайлик руками или на листочке рядом с лицом.\n\n"
+                f"⚠️ Отправь именно кружок (круглое видео), а не обычное видео!"
+            )
+            return STATE_VIDEO_NOTE
+        
+        else:
+            context.user_data['birthdate'] = user_data['birthdate']
+            context.user_data['age'] = user_data['age']
+            context.user_data['emoji'] = user_data['emoji']
+            
+            emoji = user_data['emoji']
+            await query.edit_message_text(
+                f"⏳ Продолжаем верификацию!\n\n"
+                f"📅 Возраст: {user_data['age']} лет\n"
+                f"😀 Смайлик: {emoji}\n\n"
+                f"⚠️ Остался последний шаг — отправь кружок (круглое видео), "
+                f"где показываешь смайлик {emoji} руками или на листочке рядом с лицом.\n\n"
+                f"Подсказка: зажми кнопку микрофона и свайпни вверх, или нажми скрепку → Видеосообщение."
+            )
+            return STATE_VIDEO_NOTE
+
+    # Новый пользователь (на всякий случай, если в БД нет)
+    save_user(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        status='pending'
+    )
+    
+    await query.edit_message_text(
+        "👋 Начинаем верификацию!\n\n"
+        "Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+        "Пример: 15.03.1995"
+    )
+    return STATE_BIRTHDATE
 
 async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -822,7 +900,8 @@ def main():
     # ConversationHandler для верификации (только /start и шаги)
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("start", start)
+            CommandHandler("start", start),
+            CallbackQueryHandler(start_verify_callback, pattern=r"^start_verify$")  # ← КНОПКА НАЧАТЬ ВЕРИФИКАЦИЮ
         ],
         states={
             STATE_BIRTHDATE: [
