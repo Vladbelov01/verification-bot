@@ -873,22 +873,27 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    # Антиспам только на одинаковый /start
     if is_spam(user.id, "/start"):
         return ConversationHandler.END
     
     user_data = get_user(user.id)
 
+    # === БАН ===
     if is_banned(user.id):
         keyboard = [[InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")]]
         await update.message.reply_text("🚫 Ты заблокирован. Обратись к администрации.", reply_markup=InlineKeyboardMarkup(keyboard))
         return ConversationHandler.END
 
+    # === УЖЕ ВЕРИФИЦИРОВАН ===
     if user_data and user_data['status'] == 'verified':
         await update.message.reply_text("✅ Ты уже прошёл верификацию!")
         return ConversationHandler.END
 
+    # === ОТКЛОНЁН ===
     if user_data and user_data['status'] == 'rejected':
         keyboard = []
+        # Кнопка связи ВСЕГДА, если есть куда слать
         if MODERATION_CHAT_ID:
             keyboard.append([InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")])
         keyboard.append([InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"retry_{user.id}")])
@@ -898,7 +903,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    # === В ПРОЦЕССЕ ===
     if user_data and user_data['status'] == 'pending':
+        # ... (остальное без изменений)
         if not user_data.get('birthdate'):
             await update.message.reply_text(
                 "⏳ Ты уже начал верификацию. Давай продолжим!\n\n"
@@ -999,6 +1006,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             return STATE_DOCUMENT
 
+    # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ ===
     if GROUP_CHAT_ID:
         await update.message.reply_text(
             "👋 Привет! Это бот для верификации перед вступлением в приватную группу.\n\n"
@@ -1014,6 +1022,164 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пример: 15.03.1995"
         )
         return STATE_BIRTHDATE
+    
+    return ConversationHandler.END
+
+
+async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    
+    # Антиспам
+    if is_spam(user.id, query.data):
+        return ConversationHandler.END
+    
+    # === СНАЧАЛА ПОЛУЧАЕМ ДАННЫЕ (было сломано!) ===
+    user_data = get_user(user.id)
+    
+    # === БАН ===
+    if is_banned(user.id):
+        keyboard = [[InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")]]
+        await query.edit_message_text("🚫 Ты заблокирован. Обратись к администрации.", reply_markup=InlineKeyboardMarkup(keyboard))
+        return ConversationHandler.END
+
+    # === УЖЕ ВЕРИФИЦИРОВАН ===
+    if user_data and user_data['status'] == 'verified':
+        await query.edit_message_text("✅ Ты уже прошёл верификацию!")
+        return ConversationHandler.END
+
+    # === ОТКЛОНЁН ===
+    if user_data and user_data['status'] == 'rejected':
+        keyboard = []
+        if MODERATION_CHAT_ID:
+            keyboard.append([InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")])
+        keyboard.append([InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"retry_{user.id}")])
+        await query.edit_message_text(
+            "❌ Твоя верификация была отклонена.\n\nЕсли считаешь, что ошибка — нажми кнопку ниже:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    # === В ПРОЦЕССЕ ===
+    if user_data and user_data['status'] == 'pending':
+        if not user_data.get('birthdate'):
+            await query.edit_message_text(
+                "⏳ Ты уже начал верификацию. Давай продолжим!\n\n"
+                "Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+                "Пример: 15.03.1995"
+            )
+            return STATE_BIRTHDATE
+        
+        method = user_data.get('verification_method')
+        
+        if not method:
+            context.user_data['birthdate'] = user_data['birthdate']
+            context.user_data['age'] = user_data['age']
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎥 Кружок (видео)", callback_data="verify_video"),
+                    InlineKeyboardButton("📄 Документ (фото)", callback_data="verify_doc")
+                ]
+            ])
+            await query.edit_message_text(
+                f"📅 Возраст: {user_data['age']} лет\n\n"
+                f"Выбери способ верификации:",
+                reply_markup=keyboard
+            )
+            return STATE_CHOICE
+        
+        elif method == 'video':
+            if not user_data.get('emoji'):
+                emoji = generate_emoji()
+                context.user_data['birthdate'] = user_data['birthdate']
+                context.user_data['age'] = user_data['age']
+                context.user_data['emoji'] = emoji
+                
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET emoji = ? WHERE user_id = ?", (emoji, user.id))
+                conn.commit()
+                conn.close()
+                
+                await query.edit_message_text(
+                    f"⏳ Продолжаем верификацию!\n\n"
+                    f"📅 Возраст: {user_data['age']} лет\n\n"
+                    f"Шаг 2/2: Твой персональный смайлик: {emoji}\n\n"
+                    f"Запиши кружок, где показываешь этот смайлик руками или на листочке рядом с лицом.\n\n"
+                    f"⚠️ Отправь именно кружок (круглое видео), а не обычное видео!"
+                )
+                return STATE_VIDEO_NOTE
+            else:
+                context.user_data['birthdate'] = user_data['birthdate']
+                context.user_data['age'] = user_data['age']
+                context.user_data['emoji'] = user_data['emoji']
+                
+                emoji = user_data['emoji']
+                await query.edit_message_text(
+                    f"⏳ Продолжаем верификацию!\n\n"
+                    f"📅 Возраст: {user_data['age']} лет\n"
+                    f"😀 Смайлик: {emoji}\n\n"
+                    f"⚠️ Остался последний шаг — отправь кружок (круглое видео), "
+                    f"где показываешь смайлик {emoji} руками или на листочке рядом с лицом.\n\n"
+                    f"Подсказка: зажми кнопку микрофона и свайпни вверх, или нажми скрепку → Видеосообщение."
+                )
+                return STATE_VIDEO_NOTE
+        
+        elif method == 'document':
+            doc_code = user_data.get('doc_code')
+            if not doc_code:
+                doc_code = generate_doc_code()
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET doc_code = ? WHERE user_id = ?", (doc_code, user.id))
+                conn.commit()
+                conn.close()
+            
+            context.user_data['birthdate'] = user_data['birthdate']
+            context.user_data['age'] = user_data['age']
+            context.user_data['doc_code'] = doc_code
+            context.user_data['verification_method'] = 'document'
+            
+            text = (
+                f"📄 Продолжаем верификацию через документ!\n\n"
+                f"Сгенерированный код: <b>{doc_code}</b>\n"
+                f"Напиши этот код на бумажке и положи рядом с документом, подтверждающим возраст.\n\n"
+                f"⚠️ ВАЖНО: Замыли (закрась/размой) на фото:\n"
+                f"— Серию и номер документа\n"
+                f"— Фамилию и имя\n"
+                f"— Своё фото в документе\n"
+                f"— Любые другие чувствительные данные\n\n"
+                f"Должно быть видно только:\n"
+                f"— Дату рождения\n"
+                f"— Код на бумажке рядом\n\n"
+                f"📎 Отправь фото (не файлом, а именно фото)."
+            )
+            
+            if GIF_INSTRUCTION_FILE_ID:
+                await query.edit_message_text("Загружаю инструкцию...")
+                await context.bot.send_animation(chat_id=user.id, animation=GIF_INSTRUCTION_FILE_ID, caption=text, parse_mode='HTML')
+            else:
+                await query.edit_message_text(text, parse_mode='HTML')
+            
+            return STATE_DOCUMENT
+
+    # === НОВЫЙ ПОЛЬЗОВАТЕЛЬ ===
+    save_user(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        status='pending'
+    )
+    
+    await query.edit_message_text(
+        "👋 Начинаем верификацию!\n\n"
+        "Шаг 1/2: Напиши свою дату рождения в формате ДД.ММ.ГГГГ\n"
+        "Пример: 15.03.1995"
+    )
+    return STATE_BIRTHDATE
     
     return ConversationHandler.END
 
