@@ -872,6 +872,8 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+# Закрываем сессию поддержки, если была открыта
+    close_support_session(user.id)
     
     # Антиспам только на одинаковый /start
     if is_spam(user.id, "/start"):
@@ -1031,6 +1033,7 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     
     user = update.effective_user
+    close_support_session(user.id)
     
     # Антиспам
     if is_spam(user.id, query.data):
@@ -1945,6 +1948,7 @@ async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(context.args[0])
         unban_user(user_id)
         reset_user(user_id)
+        close_support_session(user_id)
         
         # === АМНИСТИЯ ===
         try:
