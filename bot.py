@@ -84,6 +84,20 @@ def is_rate_limited(ip: str, max_requests: int = 10, window: int = 60) -> bool:
     request_counts[ip].append(now)
     return False
 
+# ==================== АНТИСПАМ (ЛС) ====================
+
+user_rate_limits = {}
+
+def is_spam(user_id: int, key: str, cooldown: int = 4) -> bool:
+    """True если пользователь спамит одинаковым действием"""
+    now = time.time()
+    user_key = f"{user_id}:{key}"
+    last_time = user_rate_limits.get(user_key, 0)
+    if now - last_time < cooldown:
+        return True
+    user_rate_limits[user_key] = now
+    return False
+
 # ==================== ЛОГИРОВАНИЕ ====================
 
 logging.basicConfig(
@@ -142,6 +156,36 @@ def init_db():
             reason TEXT,
             banned_by INTEGER,
             banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # === НОВОЕ: сессии поддержки ===
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS support_sessions (
+            user_id INTEGER PRIMARY KEY,
+            mod_chat_id INTEGER,
+            status TEXT DEFAULT 'open',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # === НОВОЕ: маппинг сообщений бота в модерации → user_id ===
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mod_message_map (
+            mod_msg_id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            mod_chat_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # === НОВОЕ: очередь на удаление после модерации ===
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS moderation_queue (
+            bot_msg_id INTEGER PRIMARY KEY,
+            forwarded_msg_id INTEGER,
+            chat_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -235,6 +279,80 @@ def update_user_status(user_id, status, admin_id=None, rejection_reason=None):
     conn.commit()
     conn.close()
 
+# ==================== ПОДДЕРЖКА (ТУННЕЛЬ) ====================
+
+def start_support_session(user_id, mod_chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO support_sessions (user_id, mod_chat_id, status)
+        VALUES (?, ?, 'open')
+    ''', (user_id, mod_chat_id))
+    conn.commit()
+    conn.close()
+
+def is_support_mode(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM support_sessions WHERE user_id = ? AND status = 'open'", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def close_support_session(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM support_sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def save_mod_message_map(mod_msg_id, user_id, mod_chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO mod_message_map (mod_msg_id, user_id, mod_chat_id)
+        VALUES (?, ?, ?)
+    ''', (mod_msg_id, user_id, mod_chat_id))
+    conn.commit()
+    conn.close()
+
+def get_user_by_mod_msg(mod_msg_id):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM mod_message_map WHERE mod_msg_id = ?", (mod_msg_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['user_id'] if row else None
+
+# ==================== МОДЕРАЦИЯ (УДАЛЕНИЕ) ====================
+
+def save_moderation_queue(bot_msg_id, forwarded_msg_id, chat_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO moderation_queue (bot_msg_id, forwarded_msg_id, chat_id)
+        VALUES (?, ?, ?)
+    ''', (bot_msg_id, forwarded_msg_id, chat_id))
+    conn.commit()
+    conn.close()
+
+def get_moderation_queue(bot_msg_id):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM moderation_queue WHERE bot_msg_id = ?", (bot_msg_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def delete_moderation_queue(bot_msg_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM moderation_queue WHERE bot_msg_id = ?", (bot_msg_id,))
+    conn.commit()
+    conn.close()
+
 # ==================== БАН ====================
 
 def is_banned(user_id: int) -> bool:
@@ -317,11 +435,13 @@ def generate_doc_code() -> str:
     return f"HGJ-{random.choice(words)}-{random.randint(10,99)}"
 
 async def send_to_moderation(context: ContextTypes.DEFAULT_TYPE, user, moderation_text: str, message_id: int, admin_keyboard):
+    """Отправляет на модерацию. Возвращает (bot_msg_id, forwarded_msg_id) или (None, None)"""
     if MODERATION_CHAT_ID:
         mod_chat_id = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
-        await context.bot.send_message(chat_id=mod_chat_id, text=moderation_text, reply_markup=admin_keyboard)
-        await context.bot.forward_message(chat_id=mod_chat_id, from_chat_id=user.id, message_id=message_id)
-        return
+        msg = await context.bot.send_message(chat_id=mod_chat_id, text=moderation_text, reply_markup=admin_keyboard)
+        fwd = await context.bot.forward_message(chat_id=mod_chat_id, from_chat_id=user.id, message_id=message_id)
+        save_moderation_queue(msg.message_id, fwd.message_id, mod_chat_id)
+        return msg.message_id, fwd.message_id
 
     if not ADMIN_IDS:
         raise RuntimeError("ADMIN_IDS не заданы и MODERATION_CHAT_ID не задан!")
@@ -332,6 +452,8 @@ async def send_to_moderation(context: ContextTypes.DEFAULT_TYPE, user, moderatio
             await context.bot.forward_message(chat_id=admin_id, from_chat_id=user.id, message_id=message_id)
         except Exception as e:
             logger.error(f"Не удалось отправить админу {admin_id}: {e}")
+    
+    return None, None
 
 async def send_to_admins(context: ContextTypes.DEFAULT_TYPE, text: str, keyboard=None):
     for admin_id in ADMIN_IDS:
@@ -339,6 +461,30 @@ async def send_to_admins(context: ContextTypes.DEFAULT_TYPE, text: str, keyboard
             await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Не удалось отправить админу {admin_id}: {e}")
+
+# ==================== УДАЛЕНИЕ СООБЩЕНИЙ ====================
+
+async def delete_mod_messages_after(context: ContextTypes.DEFAULT_TYPE, chat_id, bot_msg_id, forwarded_msg_id, delay: int = 10):
+    """Удаляет сообщения бота и пересланного медиа через N секунд"""
+    await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=bot_msg_id)
+    except Exception:
+        pass
+    try:
+        if forwarded_msg_id:
+            await context.bot.delete_message(chat_id=chat_id, message_id=forwarded_msg_id)
+    except Exception:
+        pass
+    delete_moderation_queue(bot_msg_id)
+
+# ==================== ФИЛЬТР ПОДДЕРЖКИ ====================
+
+class SupportModeFilter(filters.MessageFilter):
+    def filter(self, message):
+        return is_support_mode(message.from_user.id)
+
+support_mode_filter = SupportModeFilter()
 
 # ==================== ОБРАБОТКА НАКОПИВШИХСЯ ЗАЯВОК ====================
 
@@ -476,6 +622,121 @@ async def debug_check_bot_status(application: Application):
         logger.error(f"❌ Не удалось проверить группу: {e}")
         logger.error(f"❌ traceback: {traceback.format_exc()}")
 
+# ==================== ОБРАБОТЧИКИ ПОДДЕРЖКИ ====================
+
+async def handle_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь в режиме поддержки пишет в ЛС — пересылаем в чат модерации"""
+    user = update.effective_user
+    message = update.effective_message
+    
+    if not MODERATION_CHAT_ID:
+        return
+    
+    mod_chat_id = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
+    
+    header = f"💬 Сообщение от пользователя\n\n👤 {user.first_name} {user.last_name or ''}\n📛 @{user.username or 'нет'}\n🆔 ID: <code>{user.id}</code>\n\n"
+    
+    try:
+        if message.text:
+            text = header + message.text
+            sent = await context.bot.send_message(chat_id=mod_chat_id, text=text, parse_mode='HTML')
+        elif message.photo:
+            caption = header + (message.caption or "")
+            sent = await context.bot.send_photo(chat_id=mod_chat_id, photo=message.photo[-1].file_id, caption=caption, parse_mode='HTML')
+        elif message.video:
+            caption = header + (message.caption or "")
+            sent = await context.bot.send_video(chat_id=mod_chat_id, video=message.video.file_id, caption=caption, parse_mode='HTML')
+        elif message.voice:
+            caption = header + (message.caption or "")
+            sent = await context.bot.send_voice(chat_id=mod_chat_id, voice=message.voice.file_id, caption=caption, parse_mode='HTML')
+        else:
+            text = header + "[медиа]"
+            sent = await context.bot.send_message(chat_id=mod_chat_id, text=text, parse_mode='HTML')
+        
+        save_mod_message_map(sent.message_id, user.id, mod_chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка пересылки в модерацию: {e}")
+
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ отвечает reply на сообщение бота в чате модерации — пересылаем пользователю"""
+    if not update.message or not update.message.reply_to_message:
+        return
+    
+    if not MODERATION_CHAT_ID:
+        return
+    
+    mod_chat_id = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
+    if update.effective_chat.id != mod_chat_id:
+        return
+    
+    # Проверяем, что reply на сообщение бота
+    if update.message.reply_to_message.from_user.id != context.bot.id:
+        return
+    
+    reply_msg_id = update.message.reply_to_message.message_id
+    user_id = get_user_by_mod_msg(reply_msg_id)
+    
+    if not user_id:
+        return
+    
+    text = f"💬 Сообщение от администрации:\n\n{update.message.text or '[медиа]'}"
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+    except Exception as e:
+        logger.error(f"Не удалось отправить ответ пользователю {user_id}: {e}")
+
+async def contact_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Нажатие кнопки 'Связаться с администрацией'"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = update.effective_user
+    
+    if is_spam(user.id, "contact_admin"):
+        return
+    
+    if is_support_mode(user.id):
+        await query.edit_message_text("📞 Ты уже в режиме диалога с администрацией. Просто напиши сообщение.")
+        return
+    
+    if not MODERATION_CHAT_ID:
+        await query.edit_message_text("❌ Чат модерации не настроен.")
+        return
+    
+    mod_chat_id = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
+    
+    user_data = get_user(user.id)
+    info = ""
+    if user_data:
+        info = (
+            f"📅 ДР: {user_data.get('birthdate') or '—'}\n"
+            f"🔢 Возраст: {user_data.get('age') or '—'}\n"
+            f"📌 Статус: {user_data.get('status') or '—'}\n"
+        )
+    
+    text = (
+        f"🔔 Пользователь просит помощи\n\n"
+        f"👤 {user.first_name} {user.last_name or ''}\n"
+        f"📛 @{user.username or 'нет'}\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"{info}\n"
+        f"💬 Нажмите <b>Ответить</b> на это сообщение, чтобы написать пользователю."
+    )
+    
+    try:
+        sent = await context.bot.send_message(chat_id=mod_chat_id, text=text, parse_mode='HTML')
+        save_mod_message_map(sent.message_id, user.id, mod_chat_id)
+        start_support_session(user.id, mod_chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка отправки в модерацию: {e}")
+        await query.edit_message_text("❌ Не удалось связаться с администрацией. Попробуй позже.")
+        return
+    
+    await query.edit_message_text(
+        "📞 Связь с администрацией открыта.\n\n"
+        "Теперь просто напиши своё сообщение — я передам его администраторам."
+    )
+
 # ==================== ОБРАБОТЧИКИ ====================
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -580,9 +841,7 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if new_member.user.id == context.bot.id:
         return
     
-    # ===== ТОЛЬКО АДМИНСКАЯ ГРУППА =====
     if MODERATION_CHAT_ID and chat.id == int(MODERATION_CHAT_ID):
-        # Вошёл в админскую группу
         if old_member.status in ('left', 'kicked') and new_member.status in ('member', 'administrator', 'restricted', 'creator'):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➕ Добавить в админы бота", callback_data=f"addadmin_{new_member.user.id}")]
@@ -597,7 +856,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_to_admins(context, text, keyboard)
             logger.info(f"📨 Предложено добавить {new_member.user.id} (вход в админскую группу)")
         
-        # Вышел из админской группы
         elif old_member.status in ('member', 'administrator', 'restricted', 'creator') and new_member.status in ('left', 'kicked'):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➖ Удалить из админов бота", callback_data=f"removeadmin_{new_member.user.id}")]
@@ -614,11 +872,15 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if is_spam(user.id, "/start"):
+        return ConversationHandler.END
+    
     user_data = get_user(user.id)
 
-    # Проверка бана при /start
     if is_banned(user.id):
-        await update.message.reply_text("🚫 Ты заблокирован. Обратись к администрации.")
+        keyboard = [[InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")]]
+        await update.message.reply_text("🚫 Ты заблокирован. Обратись к администрации.", reply_markup=InlineKeyboardMarkup(keyboard))
         return ConversationHandler.END
 
     if user_data and user_data['status'] == 'verified':
@@ -627,8 +889,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_data and user_data['status'] == 'rejected':
         keyboard = []
-        if ADMIN_IDS:
-            keyboard.append([InlineKeyboardButton("📞 Связаться с администрацией", url=f"tg://user?id={ADMIN_IDS[0]}")])
+        if MODERATION_CHAT_ID:
+            keyboard.append([InlineKeyboardButton("📞 Связаться с администрацией", callback_data="contact_admin")])
         keyboard.append([InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"retry_{user.id}")])
         await update.message.reply_text(
             "❌ Твоя верификация была отклонена.\n\nЕсли считаешь, что ошибка — нажми кнопку ниже:",
@@ -760,7 +1022,9 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     
     user = update.effective_user
-    user_data = get_user(user.id)
+    
+    if is_spam(user.id, query.data):
+        return ConversationHandler.END
     
     if is_banned(user.id):
         await query.edit_message_text("🚫 Ты заблокирован.")
@@ -769,6 +1033,8 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if user_data and user_data['status'] == 'verified':
         await query.edit_message_text("✅ Ты уже прошёл верификацию!")
         return ConversationHandler.END
+
+    user_data = get_user(user.id)
 
     if user_data and user_data['status'] == 'pending':
         if not user_data.get('birthdate'):
@@ -892,6 +1158,9 @@ async def choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user = update.effective_user
     
+    if is_spam(user.id, query.data):
+        return
+    
     if query.data == "verify_video":
         emoji = generate_emoji()
         context.user_data['emoji'] = emoji
@@ -962,6 +1231,9 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.from_user.id != user_id:
         await query.edit_message_text("⛔ Это действие недоступно.")
+        return
+    
+    if is_spam(query.from_user.id, query.data):
         return
 
     reset_user(user_id)
@@ -1037,7 +1309,6 @@ async def get_birthdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    # Fallback: если context.user_data пустой (бот перезагрузился), тянем из БД
     user_db = get_user(user.id)
     group_chat_id = context.user_data.get('group_chat_id') or (user_db.get('group_chat_id') if user_db else None)
     birthdate = context.user_data.get('birthdate') or (user_db.get('birthdate') if user_db else None)
@@ -1082,7 +1353,7 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        await send_to_moderation(context, user, moderation_text, update.message.message_id, admin_keyboard)
+        bot_msg_id, forwarded_id = await send_to_moderation(context, user, moderation_text, update.message.message_id, admin_keyboard)
     except Exception as e:
         logger.error(f"Ошибка отправки на модерацию: {e}\n{traceback.format_exc()}")
         await update.message.reply_text("❌ Не удалось отправить на проверку. Попробуй ещё раз.")
@@ -1096,7 +1367,6 @@ async def get_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_document_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    # Fallback: если context.user_data пустой (бот перезагрузился), тянем из БД
     user_db = get_user(user.id)
     group_chat_id = context.user_data.get('group_chat_id') or (user_db.get('group_chat_id') if user_db else None)
     birthdate = context.user_data.get('birthdate') or (user_db.get('birthdate') if user_db else None)
@@ -1141,7 +1411,7 @@ async def get_document_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     try:
-        await send_to_moderation(context, user, moderation_text, update.message.message_id, admin_keyboard)
+        bot_msg_id, forwarded_id = await send_to_moderation(context, user, moderation_text, update.message.message_id, admin_keyboard)
     except Exception as e:
         logger.error(f"Ошибка отправки на модерацию: {e}\n{traceback.format_exc()}")
         await update.message.reply_text("❌ Не удалось отправить на проверку. Попробуй ещё раз.")
@@ -1220,7 +1490,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Не удалось уведомить {user_id}: {e}")
 
+        # === АВТОУДАЛЕНИЕ ===
         await query.edit_message_text(f"✅ Пользователь {user_id} верифицирован и заявка одобрена.")
+        pair = get_moderation_queue(query.message.message_id)
+        if pair:
+            asyncio.create_task(delete_mod_messages_after(
+                context, pair['chat_id'], query.message.message_id, pair['forwarded_msg_id'], 10
+            ))
 
     elif action == "reject":
         update_user_status(user_id, 'rejected', update.effective_user.id, "Не указана")
@@ -1248,7 +1524,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Не удалось уведомить {user_id}: {e}")
 
+        # === АВТОУДАЛЕНИЕ ===
         await query.edit_message_text(f"❌ Пользователь {user_id} отклонён.")
+        pair = get_moderation_queue(query.message.message_id)
+        if pair:
+            asyncio.create_task(delete_mod_messages_after(
+                context, pair['chat_id'], query.message.message_id, pair['forwarded_msg_id'], 10
+            ))
 
 async def add_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1471,7 +1753,6 @@ async def admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         ban_user(user_id, username, first_name, reason, update.effective_user.id)
         
-        # Если есть активная заявка — отклоняем
         user_data = get_user(user_id)
         if user_data and user_data.get('group_chat_id'):
             try:
@@ -1497,7 +1778,20 @@ async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = int(context.args[0])
         unban_user(user_id)
-        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован.")
+        reset_user(user_id)
+        
+        # === АМНИСТИЯ ===
+        try:
+            keyboard = [[InlineKeyboardButton("👉 Начать верификацию", callback_data="start_verify")]]
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="🕊️ Тебе дарована амнистия!\n\nТеперь ты можешь снова подать заявку на вступление и пройти верификацию.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить амнистию {user_id}: {e}")
+        
+        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован и может пройти верификацию заново.")
     except ValueError:
         await update.message.reply_text("Неверный формат ID.")
 
@@ -1565,17 +1859,34 @@ def main():
         per_user=True,
     )
 
-    # === ИСПРАВЛЕНО: ChatMemberHandler теперь правильно отслеживает других пользователей ===
+    # === ПОДДЕРЖКА: перехватывает сообщения в ЛС, если пользователь в режиме поддержки ===
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND & support_mode_filter,
+        handle_support_message
+    ))
+
+    # === ConversationHandler ===
+    application.add_handler(conv_handler)
+
+    # === Reply админов в чате модерации ===
+    if MODERATION_CHAT_ID:
+        mod_chat_id_int = int(MODERATION_CHAT_ID) if MODERATION_CHAT_ID.lstrip('-').isdigit() else MODERATION_CHAT_ID
+        application.add_handler(MessageHandler(
+            filters.Chat(mod_chat_id_int) & filters.REPLY,
+            handle_admin_reply
+        ))
+
+    # === Остальные хендлеры ===
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.CHAT_MEMBER))
     
-    application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(approve|reject)_\d+$"))
     application.add_handler(CallbackQueryHandler(retry_callback, pattern=r"^retry_\d+$"))
     application.add_handler(CallbackQueryHandler(add_admin_callback, pattern=r"^addadmin_\d+$"))
     application.add_handler(CallbackQueryHandler(remove_admin_callback, pattern=r"^removeadmin_\d+$"))
+    application.add_handler(CallbackQueryHandler(contact_admin_callback, pattern=r"^contact_admin$"))
     
-    # Админские команды — работают в ЛС и в группах
+    # Админские команды
     application.add_handler(CommandHandler("info", admin_info))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("list", admin_list))
