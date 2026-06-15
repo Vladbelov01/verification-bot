@@ -74,7 +74,7 @@ def is_telegram_ip(ip: str) -> bool:
         pass
     return False
 
-def is_rate_limited(ip: str, max_requests: int = 10, window: int = 60) -> bool:
+def is_rate_limited(ip: str, max_requests: int = 1000, window: int = 60) -> bool:
     if not ip:
         return False
     now = time.time()
@@ -1033,6 +1033,7 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     
     user = update.effective_user
+    user_data = get_user(user.id)
     close_support_session(user.id)
     
     # Антиспам
@@ -1189,7 +1190,7 @@ async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def start_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+    user_data = get_user(user.id)
     user = update.effective_user
     
     if is_spam(user.id, query.data):
